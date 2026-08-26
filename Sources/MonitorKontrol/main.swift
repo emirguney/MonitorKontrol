@@ -46,7 +46,7 @@ actor DDCClient {
         }
     }
 
-    func discover() -> ([DisplayDevice], String?) {
+    func discover(probeControls: Bool) -> ([DisplayDevice], String?) {
         let result = run(["display", "list", "detailed"])
         guard result.succeeded else {
             let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -70,12 +70,12 @@ actor DDCClient {
 
             let rawName = String(line[nameRange])
             let displayName = rawName == "Unknown Display" ? "Harici Monitör" : rawName
-            let brightness = probeNumeric(index: index, command: "luminance")
-            let contrast = probeNumeric(index: index, command: "contrast")
-            let volume = probeNumeric(index: index, command: "volume")
-            let mute = probeValue(index: index, command: "mute")
-            let standardInput = probeValue(index: index, command: "input")
-            let lgInput = probeValue(index: index, command: "input-alt")
+            let brightness = probeControls ? probeNumeric(index: index, command: "luminance") : nil
+            let contrast = probeControls ? probeNumeric(index: index, command: "contrast") : nil
+            let volume = probeControls ? probeNumeric(index: index, command: "volume") : nil
+            let mute = probeControls ? probeValue(index: index, command: "mute") : nil
+            let standardInput = probeControls ? probeValue(index: index, command: "input") : nil
+            let lgInput = probeControls ? probeValue(index: index, command: "input-alt") : nil
             let needsWriteOnlyFallback = brightness == nil || contrast == nil || volume == nil ||
                 mute == nil || standardInput == nil || lgInput == nil
 
@@ -312,7 +312,7 @@ final class MonitorModel: ObservableObject {
         refresh()
     }
 
-    func refresh() {
+    func refresh(probeControls: Bool = false) {
         guard !isRefreshing else { return }
         isRefreshing = true
         lastError = nil
@@ -320,7 +320,10 @@ final class MonitorModel: ObservableObject {
 
         Task {
             let builtIn = builtInController.discover()
-            let (externalDisplays, error) = await client.discover()
+            let (discoveredExternalDisplays, error) = await client.discover(probeControls: probeControls)
+            let externalDisplays = probeControls
+                ? discoveredExternalDisplays
+                : preserveKnownControls(in: discoveredExternalDisplays)
             displays = [builtIn].compactMap { $0 } + externalDisplays
             isRefreshing = false
             lastError = error
@@ -331,6 +334,31 @@ final class MonitorModel: ObservableObject {
             } else {
                 status = "\(externalDisplays.count) harici monitör bulundu"
             }
+        }
+    }
+
+    private func preserveKnownControls(in discovered: [DisplayDevice]) -> [DisplayDevice] {
+        let previousByID = Dictionary(
+            uniqueKeysWithValues: displays
+                .filter { $0.kind == .external }
+                .map { ($0.id, $0) }
+        )
+
+        return discovered.map { fresh in
+            guard let previous = previousByID[fresh.id] else { return fresh }
+            return DisplayDevice(
+                id: fresh.id,
+                index: fresh.index,
+                name: fresh.name,
+                kind: fresh.kind,
+                brightness: previous.brightness,
+                contrast: previous.contrast,
+                volume: previous.volume,
+                mute: previous.mute,
+                standardInput: previous.standardInput,
+                lgInput: previous.lgInput,
+                writeOnlyFallback: previous.writeOnlyFallback
+            )
         }
     }
 
@@ -453,12 +481,12 @@ struct MonitorPanel: View {
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { model.refresh() } label: {
+                Button { model.refresh(probeControls: true) } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
                 .disabled(model.isRefreshing)
-                .help("Monitörleri yeniden tara")
+                .help("Monitörleri ve DDC değerlerini yeniden tara")
             }
 
             ForEach(model.displays) { display in
@@ -585,14 +613,55 @@ struct MonitorPanel: View {
     }
 }
 
-@main
-struct MonitorKontrolApp: App {
-    @StateObject private var model = MonitorModel()
+@MainActor
+final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
+    private let model = MonitorModel()
+    private var statusItem: NSStatusItem?
+    private let popover = NSPopover()
 
-    var body: some Scene {
-        MenuBarExtra("MonitorKontrol", systemImage: "display") {
-            MonitorPanel().environmentObject(model)
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "display", accessibilityDescription: "MonitorKontrol")
+            button.imagePosition = .imageOnly
+            button.target = self
+            button.action = #selector(togglePopover(_:))
+            button.sendAction(on: [.leftMouseUp])
         }
-        .menuBarExtraStyle(.window)
+        statusItem = item
+
+        let hostingController = NSHostingController(
+            rootView: MonitorPanel()
+                .environmentObject(model)
+                .background(Color(nsColor: .windowBackgroundColor))
+        )
+        hostingController.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = hostingController
+        popover.behavior = .transient
+        popover.animates = false
+    }
+
+    @objc private func togglePopover(_ sender: NSStatusBarButton) {
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+}
+
+@main
+enum MonitorKontrolApplication {
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = MonitorKontrolAppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
     }
 }

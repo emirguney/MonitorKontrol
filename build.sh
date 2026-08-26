@@ -4,10 +4,10 @@ set -euo pipefail
 PROJECT_DIR="${0:A:h}"
 BUILD_DIR="$PROJECT_DIR/.build"
 APP_DIR="$PROJECT_DIR/dist/MonitorKontrol.app"
-export CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache"
-export SWIFT_MODULECACHE_PATH="$BUILD_DIR/ModuleCache"
+export CLANG_MODULE_CACHE_PATH="$BUILD_DIR/ModuleCache-v2"
+export SWIFT_MODULECACHE_PATH="$BUILD_DIR/ModuleCache-v2"
 
-mkdir -p "$BUILD_DIR/ModuleCache" "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$BUILD_DIR/ModuleCache-v2" "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 make -C "$PROJECT_DIR/Vendor/m1ddc" clean binary
 

@@ -13,7 +13,9 @@ macOS menü çubuğundan harici monitörün DDC/CI kontrollerini yöneten yerel 
 - Standart giriş kodlarının yanında LG monitörlerin alternatif giriş kodlarını da destekler.
 - Birden fazla monitör arasında seçim yapılabilir.
 - HDMI monitör takıldığında, çıkarıldığında veya Mac uykudan uyandığında liste otomatik yenilenir.
-- Menüdeki yenileme düğmesi manuel tekrar tarama için ayrıca korunur.
+- Otomatik yenileme yalnızca ekran listesini tarar; pahalı DDC değer okumalarını çalıştırmaz.
+- Menüdeki yenileme düğmesi ekran listesini ve gerçek DDC değerlerini manuel olarak tekrar okur.
+- Menü çubuğu arayüzü Tahoe'nun değişken `MenuBarExtra` görünümü yerine klasik `NSStatusItem` ve hafif bir popover kullanır.
 - DDC motoru uygulamanın içine gömülür; ayrıca Homebrew paketi gerekmez.
 
 ## Derleme
