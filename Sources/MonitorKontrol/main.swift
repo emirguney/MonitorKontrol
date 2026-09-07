@@ -22,8 +22,6 @@ struct DisplayDevice: Identifiable, Sendable, Equatable {
     var contrast: NumericCapability?
     var volume: NumericCapability?
     var mute: Int?
-    var standardInput: Int?
-    var lgInput: Int?
     var writeOnlyFallback: Bool
 }
 
@@ -74,10 +72,8 @@ actor DDCClient {
             let contrast = probeControls ? probeNumeric(index: index, command: "contrast") : nil
             let volume = probeControls ? probeNumeric(index: index, command: "volume") : nil
             let mute = probeControls ? probeValue(index: index, command: "mute") : nil
-            let standardInput = probeControls ? probeValue(index: index, command: "input") : nil
-            let lgInput = probeControls ? probeValue(index: index, command: "input-alt") : nil
             let needsWriteOnlyFallback = brightness == nil || contrast == nil || volume == nil ||
-                mute == nil || standardInput == nil || lgInput == nil
+                mute == nil
 
             devices.append(DisplayDevice(
                 id: String(line[idRange]),
@@ -88,8 +84,6 @@ actor DDCClient {
                 contrast: contrast ?? (needsWriteOnlyFallback ? NumericCapability(current: 50, maximum: 100) : nil),
                 volume: volume ?? (needsWriteOnlyFallback ? NumericCapability(current: 50, maximum: 100) : nil),
                 mute: mute ?? (needsWriteOnlyFallback ? 2 : nil),
-                standardInput: standardInput ?? (needsWriteOnlyFallback ? 17 : nil),
-                lgInput: lgInput ?? (needsWriteOnlyFallback ? 144 : nil),
                 writeOnlyFallback: needsWriteOnlyFallback
             ))
         }
@@ -195,8 +189,6 @@ final class BuiltInDisplayController {
             contrast: nil,
             volume: nil,
             mute: nil,
-            standardInput: nil,
-            lgInput: nil,
             writeOnlyFallback: false
         )
     }
@@ -309,7 +301,8 @@ final class MonitorModel: ObservableObject {
             Task { @MainActor [weak self] in self?.refresh() }
         }
         displayObserver?.start()
-        refresh()
+        // Read current values once at launch; display callbacks only refresh topology.
+        refresh(probeControls: true)
     }
 
     func refresh(probeControls: Bool = false) {
@@ -355,8 +348,6 @@ final class MonitorModel: ObservableObject {
                 contrast: previous.contrast,
                 volume: previous.volume,
                 mute: previous.mute,
-                standardInput: previous.standardInput,
-                lgInput: previous.lgInput,
                 writeOnlyFallback: previous.writeOnlyFallback
             )
         }
@@ -392,8 +383,6 @@ final class MonitorModel: ObservableObject {
         case "contrast": displays[position].contrast?.current = value
         case "volume": displays[position].volume?.current = value
         case "mute": displays[position].mute = value
-        case "input": displays[position].standardInput = value
-        case "input-alt": displays[position].lgInput = value
         default: break
         }
     }
@@ -436,42 +425,10 @@ struct ControlSlider: View {
     }
 }
 
-struct InputSelector: View {
-    let title: String
-    let current: Int
-    let options: [(String, Int)]
-    let onSelect: (Int) -> Void
-
-    var body: some View {
-        HStack {
-            Label(title, systemImage: "rectangle.connected.to.line.below")
-            Spacer()
-            Menu(inputName(current)) {
-                ForEach(options, id: \.1) { option in
-                    Button(option.0) { onSelect(option.1) }
-                }
-            }
-        }
-    }
-
-    private func inputName(_ value: Int) -> String {
-        options.first(where: { $0.1 == value })?.0 ?? "Kod \(value)"
-    }
-}
-
 struct MonitorPanel: View {
     @EnvironmentObject private var model: MonitorModel
     @State private var expandedDisplayIDs: Set<String> = []
     @State private var knownDisplayIDs: Set<String> = []
-
-    private let standardInputs = [
-        ("DisplayPort 1", 15), ("DisplayPort 2", 16),
-        ("HDMI 1", 17), ("HDMI 2", 18), ("USB-C", 27)
-    ]
-    private let lgInputs = [
-        ("DisplayPort 1", 208), ("DisplayPort 2", 209),
-        ("HDMI 1", 144), ("HDMI 2", 145), ("USB-C / DP 3", 210)
-    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -599,16 +556,7 @@ struct MonitorPanel: View {
                     set: { model.set("mute", value: $0 ? 1 : 2, on: display) }
                 ))
             }
-            if let input = display.standardInput {
-                InputSelector(title: "Giriş", current: input, options: standardInputs) {
-                    model.set("input", value: $0, on: display)
-                }
-            }
-            if let input = display.lgInput {
-                InputSelector(title: "LG girişi", current: input, options: lgInputs) {
-                    model.set("input-alt", value: $0, on: display)
-                }
-            }
+
         }
     }
 }
