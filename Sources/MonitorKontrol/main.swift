@@ -498,7 +498,8 @@ struct MonitorPanel: View {
                 Button { model.refresh(probeControls: true) } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.glass)
+                .controlSize(.small)
                 .disabled(model.isRefreshing)
                 .help("Monitörleri ve DDC değerlerini yeniden tara")
             }
@@ -650,10 +651,7 @@ struct MonitorPanel: View {
                     .font(.caption)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(.thinMaterial, in: Capsule())
-                    .overlay {
-                        Capsule().stroke(.primary.opacity(0.08), lineWidth: 1)
-                    }
+                    .glassEffect(.regular, in: .capsule)
                 } else {
                     ControlSlider(title: "Kontrast", icon: "circle.lefthalf.filled", capability: contrast) {
                         model.set("contrast", value: $0, on: display)
@@ -709,7 +707,6 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(
             rootView: MonitorPanel()
                 .environmentObject(model)
-                .background(Color(nsColor: .windowBackgroundColor))
         )
         hostingController.sizingOptions = [.preferredContentSize]
         popover.contentViewController = hostingController
