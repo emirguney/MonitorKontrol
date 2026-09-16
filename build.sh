@@ -15,7 +15,7 @@ xcrun swiftc \
   -parse-as-library \
   -swift-version 5 \
   -O \
-  -target arm64-apple-macos14.0 \
+  -target arm64-apple-macos26.0 \
   -framework SwiftUI \
   -framework AppKit \
   "$PROJECT_DIR/Sources/MonitorKontrol/main.swift" \

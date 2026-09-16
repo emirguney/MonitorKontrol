@@ -36,7 +36,7 @@ Derlenen uygulama `dist/MonitorKontrol.app`, paylaşılabilir paket ise `dist/Mo
 
 ## Donanım notları
 
-- Uygulama Apple Silicon Mac içindir ve macOS 14 veya üzerini ister.
+- Uygulama Apple Silicon Mac içindir ve macOS 26 (Tahoe) veya üzerini ister.
 - MacBookPro18,3 modelindeki dahili HDMI hattı için MCDP29xx DDC köprüsü ve köprüye özel `0xB7` adresi desteklenir.
 - DDC/CI desteği monitöre, kabloya ve monitörün kendi ayarlarına göre değişir.
 - Geliştirme sırasında okunabilir DDC kontrolleri bildiren bir ekran olmadığı için gerçek donanıma yazma testi yapılmadı; desteksiz/okunamayan ekran durumu doğrulandı.
