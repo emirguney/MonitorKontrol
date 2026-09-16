@@ -376,6 +376,52 @@ final class MonitorModel: ObservableObject {
         }
     }
 
+    func setLinkedBrightness(_ value: Int, contrastPercentage: Int, on display: DisplayDevice) {
+        guard display.kind == .external,
+              let brightness = display.brightness,
+              let contrast = display.contrast else {
+            set("luminance", value: value, on: display)
+            return
+        }
+
+        let brightnessValue = min(max(value, 0), brightness.maximum)
+        let brightnessDelta = Double(brightnessValue - brightness.current) / Double(brightness.maximum)
+        let contrastRatio = Double(min(max(contrastPercentage, 0), 100)) / 100
+        let contrastDelta = Int((brightnessDelta * Double(contrast.maximum) * contrastRatio).rounded())
+        let contrastValue = min(max(contrast.current + contrastDelta, 0), contrast.maximum)
+
+        Task {
+            let brightnessResult = await client.set(
+                index: display.index,
+                command: "luminance",
+                value: brightnessValue
+            )
+            guard brightnessResult.succeeded else {
+                lastError = brightnessResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                return
+            }
+            update(displayID: display.id, command: "luminance", value: brightnessValue)
+
+            guard contrastValue != contrast.current else {
+                lastError = nil
+                return
+            }
+
+            let contrastResult = await client.set(
+                index: display.index,
+                command: "contrast",
+                value: contrastValue
+            )
+            guard contrastResult.succeeded else {
+                let message = contrastResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                lastError = "Parlaklık ayarlandı; kontrast ayarlanamadı. \(message)"
+                return
+            }
+            update(displayID: display.id, command: "contrast", value: contrastValue)
+            lastError = nil
+        }
+    }
+
     private func update(displayID: String, command: String, value: Int) {
         guard let position = displays.firstIndex(where: { $0.id == displayID }) else { return }
         switch command {
@@ -429,6 +475,17 @@ struct MonitorPanel: View {
     @EnvironmentObject private var model: MonitorModel
     @State private var expandedDisplayIDs: Set<String> = []
     @State private var knownDisplayIDs: Set<String> = []
+    @State private var linkedContrastDisplayIDs: Set<String> = []
+    @State private var linkedContrastPercentages: [String: Int] = [:]
+
+    private static let percentageFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimum = 0
+        formatter.maximum = 100
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -513,6 +570,8 @@ struct MonitorPanel: View {
         let currentIDs = Set(model.displays.map(\.id))
         expandedDisplayIDs.formIntersection(currentIDs)
         knownDisplayIDs.formIntersection(currentIDs)
+        linkedContrastDisplayIDs.formIntersection(currentIDs)
+        linkedContrastPercentages = linkedContrastPercentages.filter { currentIDs.contains($0.key) }
 
         for display in model.displays where !knownDisplayIDs.contains(display.id) {
             if display.kind == .external {
@@ -537,12 +596,68 @@ struct MonitorPanel: View {
 
             if let brightness = display.brightness {
                 ControlSlider(title: "Parlaklık", icon: "sun.max", capability: brightness) {
-                    model.set("luminance", value: $0, on: display)
+                    if linkedContrastDisplayIDs.contains(display.id) {
+                        model.setLinkedBrightness(
+                            $0,
+                            contrastPercentage: linkedContrastPercentage(for: display),
+                            on: display
+                        )
+                    } else {
+                        model.set("luminance", value: $0, on: display)
+                    }
                 }
             }
             if let contrast = display.contrast {
-                ControlSlider(title: "Kontrast", icon: "circle.lefthalf.filled", capability: contrast) {
-                    model.set("contrast", value: $0, on: display)
+                if display.kind == .external, display.brightness != nil, !display.writeOnlyFallback {
+                    Toggle("Parlaklıkla kontrastı birlikte ayarla", isOn: Binding(
+                        get: { linkedContrastDisplayIDs.contains(display.id) },
+                        set: { isLinked in
+                            if isLinked {
+                                linkedContrastDisplayIDs.insert(display.id)
+                            } else {
+                                linkedContrastDisplayIDs.remove(display.id)
+                            }
+                        }
+                    ))
+                    .font(.caption)
+                    .help("Parlaklık değişiminin kontrasta ne kadar uygulanacağını ayarla")
+                }
+
+                if linkedContrastDisplayIDs.contains(display.id) {
+                    HStack {
+                        Label("Kontrast", systemImage: "circle.lefthalf.filled")
+                        Spacer()
+                        Text("\(contrast.current)")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        Label("Kontrast etkisi", systemImage: "dial.medium")
+                        Spacer()
+                        TextField(
+                            "50",
+                            value: linkedContrastPercentageBinding(for: display),
+                            formatter: Self.percentageFormatter
+                        )
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .frame(width: 32)
+                        Text("%")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(.thinMaterial, in: Capsule())
+                    .overlay {
+                        Capsule().stroke(.primary.opacity(0.08), lineWidth: 1)
+                    }
+                } else {
+                    ControlSlider(title: "Kontrast", icon: "circle.lefthalf.filled", capability: contrast) {
+                        model.set("contrast", value: $0, on: display)
+                    }
                 }
             }
             if let volume = display.volume {
@@ -558,6 +673,17 @@ struct MonitorPanel: View {
             }
 
         }
+    }
+
+    private func linkedContrastPercentage(for display: DisplayDevice) -> Int {
+        linkedContrastPercentages[display.id] ?? 50
+    }
+
+    private func linkedContrastPercentageBinding(for display: DisplayDevice) -> Binding<Int> {
+        Binding(
+            get: { linkedContrastPercentage(for: display) },
+            set: { linkedContrastPercentages[display.id] = min(max($0, 0), 100) }
+        )
     }
 }
 
