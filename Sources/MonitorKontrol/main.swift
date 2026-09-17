@@ -295,14 +295,22 @@ final class MonitorModel: ObservableObject {
     private let client = DDCClient()
     private let builtInController = BuiltInDisplayController()
     private var displayObserver: DisplayChangeObserver?
+    private var hasStarted = false
 
     init() {
         displayObserver = DisplayChangeObserver { [weak self] in
             Task { @MainActor [weak self] in self?.refresh() }
         }
-        displayObserver?.start()
-        // Read current values once at launch; display callbacks only refresh topology.
+    }
+
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+
+        // Win the startup race with display callbacks: the first refresh must probe
+        // the monitor instead of populating the UI with write-only fallback values.
         refresh(probeControls: true)
+        displayObserver?.start()
     }
 
     func refresh(probeControls: Bool = false) {
@@ -385,10 +393,12 @@ final class MonitorModel: ObservableObject {
         }
 
         let brightnessValue = min(max(value, 0), brightness.maximum)
-        let brightnessDelta = Double(brightnessValue - brightness.current) / Double(brightness.maximum)
         let contrastRatio = Double(min(max(contrastPercentage, 0), 100)) / 100
-        let contrastDelta = Int((brightnessDelta * Double(contrast.maximum) * contrastRatio).rounded())
-        let contrastValue = min(max(contrast.current + contrastDelta, 0), contrast.maximum)
+        let brightnessRatio = Double(brightnessValue) / Double(brightness.maximum)
+        let contrastValue = min(
+            max(Int((brightnessRatio * Double(contrast.maximum) * contrastRatio).rounded()), 0),
+            contrast.maximum
+        )
 
         Task {
             let brightnessResult = await client.set(
@@ -422,6 +432,15 @@ final class MonitorModel: ObservableObject {
         }
     }
 
+    func synchronizeLinkedContrast(percentage: Int, on display: DisplayDevice) {
+        guard let brightness = display.brightness else { return }
+        setLinkedBrightness(
+            brightness.current,
+            contrastPercentage: percentage,
+            on: display
+        )
+    }
+
     private func update(displayID: String, command: String, value: Int) {
         guard let position = displays.firstIndex(where: { $0.id == displayID }) else { return }
         switch command {
@@ -439,12 +458,23 @@ struct ControlSlider: View {
     let icon: String
     let capability: NumericCapability
     let onCommit: (Int) -> Void
+    var isMuted: Bool = false
+    var onToggleMute: (() -> Void)?
     @State private var value: Double
 
-    init(title: String, icon: String, capability: NumericCapability, onCommit: @escaping (Int) -> Void) {
+    init(
+        title: String,
+        icon: String,
+        capability: NumericCapability,
+        isMuted: Bool = false,
+        onToggleMute: (() -> Void)? = nil,
+        onCommit: @escaping (Int) -> Void
+    ) {
         self.title = title
         self.icon = icon
         self.capability = capability
+        self.isMuted = isMuted
+        self.onToggleMute = onToggleMute
         self.onCommit = onCommit
         _value = State(initialValue: Double(capability.current))
     }
@@ -452,7 +482,17 @@ struct ControlSlider: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Label(title, systemImage: icon)
+                if let onToggleMute {
+                    Button(action: onToggleMute) {
+                        Image(systemName: isMuted ? "speaker.slash.fill" : icon)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                    .help(isMuted ? "Sesi aç" : "Sessize al")
+                    Text(title)
+                } else {
+                    Label(title, systemImage: icon)
+                }
                 Spacer()
                 Text("\(Int(value))")
                     .monospacedDigit()
@@ -466,6 +506,7 @@ struct ControlSlider: View {
                     if !editing { onCommit(Int(value)) }
                 }
             )
+            .disabled(isMuted)
         }
         .onChange(of: capability.current) { _, newValue in value = Double(newValue) }
     }
@@ -487,69 +528,74 @@ struct MonitorPanel: View {
         return formatter
     }()
 
+    private static let contrastEffectPresets = [25, 50, 75]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("MonitorKontrol").font(.headline)
-                    Text(model.status).font(.caption).foregroundStyle(.secondary)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("MonitorKontrol").font(.headline)
+                        Text(model.status).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { model.refresh(probeControls: true) } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                    .disabled(model.isRefreshing)
+                    .help("Monitörleri ve DDC değerlerini yeniden tara")
                 }
-                Spacer()
-                Button { model.refresh(probeControls: true) } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.glass)
-                .controlSize(.small)
-                .disabled(model.isRefreshing)
-                .help("Monitörleri ve DDC değerlerini yeniden tara")
-            }
 
-            ForEach(model.displays) { display in
-                Divider()
-                DisclosureGroup(isExpanded: expansionBinding(for: display)) {
-                    displayControls(for: display)
-                        .padding(.top, 10)
-                } label: {
-                    Label(
-                        display.name,
-                        systemImage: display.kind == .builtIn ? "laptopcomputer" : "display"
+                ForEach(model.displays) { display in
+                    Divider()
+                    DisclosureGroup(isExpanded: expansionBinding(for: display)) {
+                        displayControls(for: display)
+                            .padding(.top, 10)
+                    } label: {
+                        Label(
+                            display.name,
+                            systemImage: display.kind == .builtIn ? "laptopcomputer" : "display"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                    }
+                }
+
+                if model.displays.isEmpty {
+                    ContentUnavailableView(
+                        "Ekran bulunamadı",
+                        systemImage: "display.trianglebadge.exclamationmark"
                     )
-                    .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 100)
+                } else {
+                    Text("Harici monitör bağlanınca HDMI kontrolleri otomatik eklenir.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = model.lastError, !error.isEmpty {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
+
+                Divider()
+                HStack {
+                    Text("Yalnızca desteklenen kontroller gösterilir.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Çık") { NSApp.terminate(nil) }
+                        .buttonStyle(.borderless)
                 }
             }
-
-            if model.displays.isEmpty {
-                ContentUnavailableView(
-                    "Ekran bulunamadı",
-                    systemImage: "display.trianglebadge.exclamationmark"
-                )
-                .frame(minHeight: 100)
-            } else {
-                Text("Harici monitör bağlanınca HDMI kontrolleri otomatik eklenir.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let error = model.lastError, !error.isEmpty {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-            }
-
-            Divider()
-            HStack {
-                Text("Yalnızca desteklenen kontroller gösterilir.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Çık") { NSApp.terminate(nil) }
-                    .buttonStyle(.borderless)
-            }
+            .padding(16)
         }
-        .padding(16)
         .frame(width: 360)
+        .frame(maxHeight: 600)
         .onAppear { synchronizeExpansionState() }
         .onChange(of: model.displays.map(\.id)) { _, _ in synchronizeExpansionState() }
     }
@@ -615,13 +661,17 @@ struct MonitorPanel: View {
                         set: { isLinked in
                             if isLinked {
                                 linkedContrastDisplayIDs.insert(display.id)
+                                model.synchronizeLinkedContrast(
+                                    percentage: linkedContrastPercentage(for: display),
+                                    on: display
+                                )
                             } else {
                                 linkedContrastDisplayIDs.remove(display.id)
                             }
                         }
                     ))
                     .font(.caption)
-                    .help("Parlaklık değişiminin kontrasta ne kadar uygulanacağını ayarla")
+                    .help("Kontrastı parlaklığın seçilen yüzdesine eşitle")
                 }
 
                 if linkedContrastDisplayIDs.contains(display.id) {
@@ -633,25 +683,42 @@ struct MonitorPanel: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Label("Kontrast etkisi", systemImage: "dial.medium")
-                        Spacer()
-                        TextField(
-                            "50",
-                            value: linkedContrastPercentageBinding(for: display),
-                            formatter: Self.percentageFormatter
-                        )
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.trailing)
-                        .monospacedDigit()
-                        .frame(width: 32)
-                        Text("%")
                             .foregroundStyle(.secondary)
+
+                        GlassEffectContainer(spacing: 4) {
+                            HStack(spacing: 4) {
+                                ForEach(Self.contrastEffectPresets, id: \.self) { preset in
+                                    let isSelected = linkedContrastPercentage(for: display) == preset
+                                    Button("\(preset)%") {
+                                        linkedContrastPercentages[display.id] = preset
+                                        model.synchronizeLinkedContrast(percentage: preset, on: display)
+                                    }
+                                    .buttonStyle(.glass)
+                                    .controlSize(.small)
+                                    .tint(isSelected ? .accentColor : nil)
+                                }
+
+                                TextField(
+                                    "50",
+                                    value: linkedContrastPercentageBinding(for: display),
+                                    formatter: Self.percentageFormatter
+                                )
+                                .textFieldStyle(.plain)
+                                .multilineTextAlignment(.center)
+                                .monospacedDigit()
+                                .frame(width: 26)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .glassEffect(.regular.interactive(), in: .capsule)
+
+                                Text("%")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .glassEffect(.regular, in: .capsule)
                 } else {
                     ControlSlider(title: "Kontrast", icon: "circle.lefthalf.filled", capability: contrast) {
                         model.set("contrast", value: $0, on: display)
@@ -659,17 +726,29 @@ struct MonitorPanel: View {
                 }
             }
             if let volume = display.volume {
-                ControlSlider(title: "Ses", icon: "speaker.wave.2", capability: volume) {
+                ControlSlider(
+                    title: "Ses",
+                    icon: "speaker.wave.2",
+                    capability: volume,
+                    isMuted: display.mute == 1,
+                    onToggleMute: display.mute.map { mute in
+                        { model.set("mute", value: mute == 1 ? 2 : 1, on: display) }
+                    }
+                ) {
                     model.set("volume", value: $0, on: display)
                 }
+            } else if let mute = display.mute {
+                Button {
+                    model.set("mute", value: mute == 1 ? 2 : 1, on: display)
+                } label: {
+                    Label(
+                        mute == 1 ? "Sessiz" : "Ses açık",
+                        systemImage: mute == 1 ? "speaker.slash.fill" : "speaker.wave.2"
+                    )
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
             }
-            if let mute = display.mute {
-                Toggle("Sessiz", isOn: Binding(
-                    get: { mute == 1 },
-                    set: { model.set("mute", value: $0 ? 1 : 2, on: display) }
-                ))
-            }
-
         }
     }
 
@@ -680,7 +759,11 @@ struct MonitorPanel: View {
     private func linkedContrastPercentageBinding(for display: DisplayDevice) -> Binding<Int> {
         Binding(
             get: { linkedContrastPercentage(for: display) },
-            set: { linkedContrastPercentages[display.id] = min(max($0, 0), 100) }
+            set: {
+                let percentage = min(max($0, 0), 100)
+                linkedContrastPercentages[display.id] = percentage
+                model.synchronizeLinkedContrast(percentage: percentage, on: display)
+            }
         )
     }
 }
@@ -693,6 +776,7 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        model.start()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
