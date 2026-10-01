@@ -528,7 +528,7 @@ struct MonitorPanel: View {
         return formatter
     }()
 
-    private static let contrastEffectPresets = [25, 50, 75]
+    private static let contrastEffectPresets = [25, 50, 75, 100]
 
     var body: some View {
         ScrollView(.vertical) {
@@ -661,6 +661,9 @@ struct MonitorPanel: View {
                         set: { isLinked in
                             if isLinked {
                                 linkedContrastDisplayIDs.insert(display.id)
+                                if linkedContrastPercentages[display.id] == nil {
+                                    linkedContrastPercentages[display.id] = 100
+                                }
                                 model.synchronizeLinkedContrast(
                                     percentage: linkedContrastPercentage(for: display),
                                     on: display
