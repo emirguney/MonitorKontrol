@@ -1177,7 +1177,12 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(sender)
         } else {
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            guard let window = popover.contentViewController?.view.window else { return }
+            // A .regular app that is not active cannot place windows over another
+            // app's full-screen Space unless they are full-screen auxiliary.
+            window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+            window.orderFrontRegardless()
+            window.makeKey()
         }
     }
 
