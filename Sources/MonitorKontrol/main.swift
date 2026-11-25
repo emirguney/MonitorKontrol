@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import ApplicationServices
 import Darwin
 import Foundation
 import SwiftUI
@@ -29,6 +30,111 @@ struct CommandResult: Sendable {
     let status: Int32
     let output: String
     var succeeded: Bool { status == 0 }
+}
+
+private enum MediaKeyAction: Sendable {
+    case volumeUp
+    case volumeDown
+    case toggleMute
+}
+
+private final class MediaKeyController {
+    private static let systemDefinedEventType = CGEventType(rawValue: 14)!
+    private let handler: @MainActor @Sendable (MediaKeyAction) -> Void
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    var isRunning: Bool { eventTap != nil }
+
+    init(handler: @escaping @MainActor @Sendable (MediaKeyAction) -> Void) {
+        self.handler = handler
+    }
+
+    deinit {
+        stop()
+    }
+
+    func start(promptForPermission: Bool) -> Bool {
+        if isRunning { return true }
+
+        guard Self.accessibilityIsTrusted(prompt: promptForPermission) else { return false }
+
+        let eventMask = CGEventMask(1) << Self.systemDefinedEventType.rawValue
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: { _, type, event, userInfo in
+                guard let userInfo else { return Unmanaged.passUnretained(event) }
+                let controller = Unmanaged<MediaKeyController>
+                    .fromOpaque(userInfo)
+                    .takeUnretainedValue()
+                return controller.handle(type: type, event: event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            return false
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTap = tap
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    func stop() {
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        runLoopSource = nil
+        eventTap = nil
+    }
+
+    static func accessibilityIsTrusted(prompt: Bool) -> Bool {
+        guard prompt else { return AXIsProcessTrusted() }
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard type == Self.systemDefinedEventType,
+              let nsEvent = NSEvent(cgEvent: event),
+              nsEvent.subtype.rawValue == 8 else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let data = nsEvent.data1
+        let keyCode = (data & 0xFFFF0000) >> 16
+        let keyState = (data & 0x0000FF00) >> 8
+        let action: MediaKeyAction
+
+        switch keyCode {
+        case 0: action = .volumeUp
+        case 1: action = .volumeDown
+        case 7: action = .toggleMute
+        default: return Unmanaged.passUnretained(event)
+        }
+
+        // 0xA is key-down (including repeats), 0xB is key-up. Consume both so
+        // macOS does not also show the locked HDMI volume indicator.
+        if keyState == 0xA {
+            DispatchQueue.main.async { [handler] in handler(action) }
+        }
+        return nil
+    }
 }
 
 actor DDCClient {
@@ -291,13 +397,29 @@ final class MonitorModel: ObservableObject {
     @Published var status = "Monitörler aranıyor…"
     @Published var isRefreshing = false
     @Published var lastError: String?
+    @Published private(set) var mediaKeyTargetDisplayID: String?
+    @Published private(set) var mediaKeyPermissionRequired = false
 
     private let client = DDCClient()
     private let builtInController = BuiltInDisplayController()
     private var displayObserver: DisplayChangeObserver?
+    private var mediaKeyController: MediaKeyController?
+    private var mediaKeyVolumeWriteTasks: [String: Task<Void, Never>] = [:]
+    private var mediaKeyVolumeGenerations: [String: Int] = [:]
+    private var confirmedMediaKeyVolumes: [String: Int] = [:]
+    private var lastAudibleVolumes: [String: Int] = [:]
+    private var pendingMediaKeyUnmuteDisplayIDs: Set<String> = []
     private var hasStarted = false
+    private static let mediaKeyTargetDefaultsKey = "mediaKeyTargetDisplayID"
+    private static let mediaKeyVolumeStep = 5
 
     init() {
+        mediaKeyTargetDisplayID = UserDefaults.standard.string(
+            forKey: Self.mediaKeyTargetDefaultsKey
+        )
+        mediaKeyController = MediaKeyController { [weak self] action in
+            self?.handleMediaKey(action)
+        }
         displayObserver = DisplayChangeObserver { [weak self] in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -326,6 +448,15 @@ final class MonitorModel: ObservableObject {
                 ? discoveredExternalDisplays
                 : preserveKnownControls(in: discoveredExternalDisplays)
             displays = [builtIn].compactMap { $0 } + externalDisplays
+            for display in externalDisplays {
+                if probeControls || confirmedMediaKeyVolumes[display.id] == nil,
+                   let currentVolume = display.volume?.current {
+                    confirmedMediaKeyVolumes[display.id] = currentVolume
+                }
+                if let currentVolume = display.volume?.current, currentVolume > 0 {
+                    lastAudibleVolumes[display.id] = currentVolume
+                }
+            }
             isRefreshing = false
             lastError = error
             if externalDisplays.isEmpty, builtIn != nil {
@@ -335,6 +466,7 @@ final class MonitorModel: ObservableObject {
             } else {
                 status = "\(externalDisplays.count) harici monitör bulundu"
             }
+            synchronizeMediaKeyCapture()
         }
     }
 
@@ -380,6 +512,9 @@ final class MonitorModel: ObservableObject {
                 return
             }
             update(displayID: display.id, command: command, value: value)
+            if command == "volume", value > 0 {
+                lastAudibleVolumes[display.id] = value
+            }
             lastError = nil
         }
     }
@@ -439,6 +574,172 @@ final class MonitorModel: ObservableObject {
             contrastPercentage: percentage,
             on: display
         )
+    }
+
+    func setMediaKeyTarget(_ enabled: Bool, displayID: String) {
+        if enabled {
+            if let previousTargetID = mediaKeyTargetDisplayID, previousTargetID != displayID {
+                cancelPendingMediaKeyVolumeWrite(for: previousTargetID)
+            }
+            mediaKeyTargetDisplayID = displayID
+            UserDefaults.standard.set(displayID, forKey: Self.mediaKeyTargetDefaultsKey)
+            synchronizeMediaKeyCapture(promptForPermission: true)
+        } else if mediaKeyTargetDisplayID == displayID {
+            mediaKeyTargetDisplayID = nil
+            UserDefaults.standard.removeObject(forKey: Self.mediaKeyTargetDefaultsKey)
+            mediaKeyController?.stop()
+            cancelPendingMediaKeyVolumeWrite(for: displayID)
+            mediaKeyPermissionRequired = false
+        }
+    }
+
+    func retryMediaKeyCapture() {
+        guard mediaKeyTargetDisplayID != nil else { return }
+        synchronizeMediaKeyCapture()
+    }
+
+    func openAccessibilitySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func synchronizeMediaKeyCapture(promptForPermission: Bool = false) {
+        guard let targetID = mediaKeyTargetDisplayID,
+              displays.contains(where: {
+                  $0.id == targetID && $0.kind == .external && $0.volume != nil
+              }) else {
+            mediaKeyController?.stop()
+            if let targetID = mediaKeyTargetDisplayID {
+                cancelPendingMediaKeyVolumeWrite(for: targetID)
+            }
+            mediaKeyPermissionRequired = false
+            return
+        }
+
+        guard let mediaKeyController else { return }
+        let started = mediaKeyController.start(promptForPermission: promptForPermission)
+        mediaKeyPermissionRequired = !started && !MediaKeyController.accessibilityIsTrusted(prompt: false)
+        if !started, !mediaKeyPermissionRequired {
+            lastError = "Klavye medya tuşları dinlenemedi. MonitorKontrol'ü yeniden başlatmayı deneyin."
+        }
+    }
+
+    private func handleMediaKey(_ action: MediaKeyAction) {
+        guard let targetID = mediaKeyTargetDisplayID,
+              let display = displays.first(where: { $0.id == targetID }) else {
+            synchronizeMediaKeyCapture()
+            return
+        }
+
+        switch action {
+        case .volumeUp:
+            adjustMediaKeyVolume(by: Self.mediaKeyVolumeStep, on: display)
+        case .volumeDown:
+            adjustMediaKeyVolume(by: -Self.mediaKeyVolumeStep, on: display)
+        case .toggleMute:
+            toggleAudioMute(on: display)
+        }
+    }
+
+    func toggleAudioMute(on display: DisplayDevice) {
+        guard display.kind == .external, let volume = display.volume else {
+            if let mute = display.mute {
+                set("mute", value: mute == 1 ? 2 : 1, on: display)
+            }
+            return
+        }
+
+        if volume.current == 0 {
+            let fallbackVolume = min(max(20, 1), volume.maximum)
+            let restoreVolume = min(
+                max(lastAudibleVolumes[display.id] ?? fallbackVolume, 1),
+                volume.maximum
+            )
+            set("volume", value: restoreVolume, on: display)
+        } else {
+            lastAudibleVolumes[display.id] = volume.current
+            set("volume", value: 0, on: display)
+        }
+    }
+
+    private func adjustMediaKeyVolume(by delta: Int, on display: DisplayDevice) {
+        guard let volume = display.volume else { return }
+        let newValue = min(max(volume.current + delta, 0), volume.maximum)
+        guard newValue != volume.current else { return }
+
+        let wasMuted = display.mute == 1
+        update(displayID: display.id, command: "volume", value: newValue)
+        if wasMuted {
+            update(displayID: display.id, command: "mute", value: 2)
+            pendingMediaKeyUnmuteDisplayIDs.insert(display.id)
+        }
+
+        mediaKeyVolumeWriteTasks[display.id]?.cancel()
+        let generation = (mediaKeyVolumeGenerations[display.id] ?? 0) + 1
+        mediaKeyVolumeGenerations[display.id] = generation
+        mediaKeyVolumeWriteTasks[display.id] = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 75_000_000)
+            } catch {
+                return
+            }
+            guard let self, self.mediaKeyVolumeGenerations[display.id] == generation else { return }
+            await self.commitMediaKeyVolume(
+                displayID: display.id,
+                displayIndex: display.index,
+                generation: generation
+            )
+        }
+    }
+
+    private func commitMediaKeyVolume(
+        displayID: String,
+        displayIndex: Int,
+        generation: Int
+    ) async {
+        guard mediaKeyVolumeGenerations[displayID] == generation,
+              let targetVolume = displays.first(where: { $0.id == displayID })?.volume?.current else {
+            return
+        }
+
+        var errors: [String] = []
+        if pendingMediaKeyUnmuteDisplayIDs.remove(displayID) != nil {
+            let unmuteResult = await client.set(index: displayIndex, command: "mute", value: 2)
+            if !unmuteResult.succeeded {
+                errors.append(unmuteResult.output.trimmingCharacters(in: .whitespacesAndNewlines))
+                if mediaKeyVolumeGenerations[displayID] == generation {
+                    update(displayID: displayID, command: "mute", value: 1)
+                }
+            }
+        }
+
+        let result = await client.set(index: displayIndex, command: "volume", value: targetVolume)
+        if result.succeeded {
+            confirmedMediaKeyVolumes[displayID] = targetVolume
+            if targetVolume > 0 {
+                lastAudibleVolumes[displayID] = targetVolume
+            }
+        } else {
+            errors.append(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            if mediaKeyVolumeGenerations[displayID] == generation,
+               let confirmedVolume = confirmedMediaKeyVolumes[displayID] {
+                update(displayID: displayID, command: "volume", value: confirmedVolume)
+            }
+        }
+
+        if mediaKeyVolumeGenerations[displayID] == generation {
+            mediaKeyVolumeWriteTasks[displayID] = nil
+            lastError = errors.isEmpty ? nil : errors.filter { !$0.isEmpty }.joined(separator: " ")
+        }
+    }
+
+    private func cancelPendingMediaKeyVolumeWrite(for displayID: String) {
+        mediaKeyVolumeWriteTasks[displayID]?.cancel()
+        mediaKeyVolumeWriteTasks[displayID] = nil
+        mediaKeyVolumeGenerations[displayID] = (mediaKeyVolumeGenerations[displayID] ?? 0) + 1
+        pendingMediaKeyUnmuteDisplayIDs.remove(displayID)
     }
 
     private func update(displayID: String, command: String, value: Int) {
@@ -733,12 +1034,40 @@ struct MonitorPanel: View {
                     title: "Ses",
                     icon: "speaker.wave.2",
                     capability: volume,
-                    isMuted: display.mute == 1,
-                    onToggleMute: display.mute.map { mute in
-                        { model.set("mute", value: mute == 1 ? 2 : 1, on: display) }
-                    }
+                    isMuted: volume.current == 0 || display.mute == 1,
+                    onToggleMute: { model.toggleAudioMute(on: display) }
                 ) {
                     model.set("volume", value: $0, on: display)
+                }
+
+                if display.kind == .external {
+                    Toggle(
+                        "Klavye ses tuşlarını bu monitöre yönlendir",
+                        isOn: Binding(
+                            get: { model.mediaKeyTargetDisplayID == display.id },
+                            set: { model.setMediaKeyTarget($0, displayID: display.id) }
+                        )
+                    )
+                    .font(.caption)
+                    .help("Ses artırma, azaltma ve sessize alma tuşlarını DDC üzerinden uygula")
+
+                    if model.mediaKeyTargetDisplayID == display.id,
+                       model.mediaKeyPermissionRequired {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(
+                                "Medya tuşlarını yakalamak için Erişilebilirlik izni gerekiyor.",
+                                systemImage: "hand.raised.fill"
+                            )
+                            .foregroundStyle(.orange)
+
+                            Button("Erişilebilirlik Ayarlarını Aç") {
+                                model.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                        }
+                        .font(.caption2)
+                    }
                 }
             } else if let mute = display.mute {
                 Button {
@@ -799,6 +1128,10 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hostingController
         popover.behavior = .transient
         popover.animates = false
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        model.retryMediaKeyCapture()
     }
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {
