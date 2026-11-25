@@ -813,12 +813,19 @@ struct ControlSlider: View {
     }
 }
 
+/// Panel UI state shared by the menu bar popover and the Dock control window,
+/// so expansion and linked-contrast choices stay identical on both surfaces.
+@MainActor
+final class MonitorPanelState: ObservableObject {
+    @Published var expandedDisplayIDs: Set<String> = []
+    @Published var knownDisplayIDs: Set<String> = []
+    @Published var linkedContrastDisplayIDs: Set<String> = []
+    @Published var linkedContrastPercentages: [String: Int] = [:]
+}
+
 struct MonitorPanel: View {
     @EnvironmentObject private var model: MonitorModel
-    @State private var expandedDisplayIDs: Set<String> = []
-    @State private var knownDisplayIDs: Set<String> = []
-    @State private var linkedContrastDisplayIDs: Set<String> = []
-    @State private var linkedContrastPercentages: [String: Int] = [:]
+    @EnvironmentObject private var panelState: MonitorPanelState
 
     private static let percentageFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -903,12 +910,12 @@ struct MonitorPanel: View {
 
     private func expansionBinding(for display: DisplayDevice) -> Binding<Bool> {
         Binding(
-            get: { expandedDisplayIDs.contains(display.id) },
+            get: { panelState.expandedDisplayIDs.contains(display.id) },
             set: { isExpanded in
                 if isExpanded {
-                    expandedDisplayIDs.insert(display.id)
+                    panelState.expandedDisplayIDs.insert(display.id)
                 } else {
-                    expandedDisplayIDs.remove(display.id)
+                    panelState.expandedDisplayIDs.remove(display.id)
                 }
             }
         )
@@ -916,17 +923,17 @@ struct MonitorPanel: View {
 
     private func synchronizeExpansionState() {
         let currentIDs = Set(model.displays.map(\.id))
-        expandedDisplayIDs.formIntersection(currentIDs)
-        knownDisplayIDs.formIntersection(currentIDs)
-        linkedContrastDisplayIDs.formIntersection(currentIDs)
-        linkedContrastPercentages = linkedContrastPercentages.filter { currentIDs.contains($0.key) }
+        panelState.expandedDisplayIDs.formIntersection(currentIDs)
+        panelState.knownDisplayIDs.formIntersection(currentIDs)
+        panelState.linkedContrastDisplayIDs.formIntersection(currentIDs)
+        panelState.linkedContrastPercentages = panelState.linkedContrastPercentages.filter { currentIDs.contains($0.key) }
 
-        for display in model.displays where !knownDisplayIDs.contains(display.id) {
+        for display in model.displays where !panelState.knownDisplayIDs.contains(display.id) {
             if display.kind == .external {
-                expandedDisplayIDs.insert(display.id)
+                panelState.expandedDisplayIDs.insert(display.id)
             }
         }
-        knownDisplayIDs = currentIDs
+        panelState.knownDisplayIDs = currentIDs
     }
 
     @ViewBuilder
@@ -944,7 +951,7 @@ struct MonitorPanel: View {
 
             if let brightness = display.brightness {
                 ControlSlider(title: "Parlaklık", icon: "sun.max", capability: brightness) {
-                    if linkedContrastDisplayIDs.contains(display.id) {
+                    if panelState.linkedContrastDisplayIDs.contains(display.id) {
                         model.setLinkedBrightness(
                             $0,
                             contrastPercentage: linkedContrastPercentage(for: display),
@@ -958,19 +965,19 @@ struct MonitorPanel: View {
             if let contrast = display.contrast {
                 if display.kind == .external, display.brightness != nil, !display.writeOnlyFallback {
                     Toggle("Parlaklıkla kontrastı birlikte ayarla", isOn: Binding(
-                        get: { linkedContrastDisplayIDs.contains(display.id) },
+                        get: { panelState.linkedContrastDisplayIDs.contains(display.id) },
                         set: { isLinked in
                             if isLinked {
-                                linkedContrastDisplayIDs.insert(display.id)
-                                if linkedContrastPercentages[display.id] == nil {
-                                    linkedContrastPercentages[display.id] = 100
+                                panelState.linkedContrastDisplayIDs.insert(display.id)
+                                if panelState.linkedContrastPercentages[display.id] == nil {
+                                    panelState.linkedContrastPercentages[display.id] = 100
                                 }
                                 model.synchronizeLinkedContrast(
                                     percentage: linkedContrastPercentage(for: display),
                                     on: display
                                 )
                             } else {
-                                linkedContrastDisplayIDs.remove(display.id)
+                                panelState.linkedContrastDisplayIDs.remove(display.id)
                             }
                         }
                     ))
@@ -978,7 +985,7 @@ struct MonitorPanel: View {
                     .help("Kontrastı parlaklığın seçilen yüzdesine eşitle")
                 }
 
-                if linkedContrastDisplayIDs.contains(display.id) {
+                if panelState.linkedContrastDisplayIDs.contains(display.id) {
                     HStack {
                         Label("Kontrast", systemImage: "circle.lefthalf.filled")
                         Spacer()
@@ -996,7 +1003,7 @@ struct MonitorPanel: View {
                                 ForEach(Self.contrastEffectPresets, id: \.self) { preset in
                                     let isSelected = linkedContrastPercentage(for: display) == preset
                                     Button("\(preset)%") {
-                                        linkedContrastPercentages[display.id] = preset
+                                        panelState.linkedContrastPercentages[display.id] = preset
                                         model.synchronizeLinkedContrast(percentage: preset, on: display)
                                     }
                                     .buttonStyle(.glass)
@@ -1085,7 +1092,7 @@ struct MonitorPanel: View {
     }
 
     private func linkedContrastPercentage(for display: DisplayDevice) -> Int {
-        linkedContrastPercentages[display.id] ?? 50
+        panelState.linkedContrastPercentages[display.id] ?? 50
     }
 
     private func linkedContrastPercentageBinding(for display: DisplayDevice) -> Binding<Int> {
@@ -1093,7 +1100,7 @@ struct MonitorPanel: View {
             get: { linkedContrastPercentage(for: display) },
             set: {
                 let percentage = min(max($0, 0), 100)
-                linkedContrastPercentages[display.id] = percentage
+                panelState.linkedContrastPercentages[display.id] = percentage
                 model.synchronizeLinkedContrast(percentage: percentage, on: display)
             }
         )
@@ -1103,11 +1110,20 @@ struct MonitorPanel: View {
 @MainActor
 final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
     private let model = MonitorModel()
+    private let panelState = MonitorPanelState()
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
+    private lazy var controlWindow = ControlWindowController { [model, panelState] in
+        Self.makePanelController(
+            model: model,
+            panelState: panelState,
+            sizingOptions: [.minSize, .maxSize]
+        )
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.mainMenu = MainMenu.make(target: self, showControlsAction: #selector(showControlWindow(_:)))
         model.start()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -1120,18 +1136,40 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem = item
 
-        let hostingController = NSHostingController(
-            rootView: MonitorPanel()
-                .environmentObject(model)
+        popover.contentViewController = Self.makePanelController(
+            model: model,
+            panelState: panelState,
+            sizingOptions: [.preferredContentSize]
         )
-        hostingController.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = hostingController
         popover.behavior = .transient
         popover.animates = false
+
+        if Self.isInteractiveLaunch(notification) {
+            controlWindow.show()
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         model.retryMediaKeyCapture()
+    }
+
+    /// Dock icon clicked while the app is already running: bring the control window forward.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        controlWindow.show()
+        return false
+    }
+
+    /// Closing the control window keeps the menu bar item and media keys alive.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
+    }
+
+    @objc private func showControlWindow(_ sender: Any?) {
+        controlWindow.show()
     }
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {
@@ -1139,8 +1177,40 @@ final class MonitorKontrolAppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(sender)
         } else {
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            guard let window = popover.contentViewController?.view.window else { return }
+            // A .regular app that is not active cannot place windows over another
+            // app's full-screen Space unless they are full-screen auxiliary.
+            window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+            window.orderFrontRegardless()
+            window.makeKey()
         }
+    }
+
+    private static func makePanelController(
+        model: MonitorModel,
+        panelState: MonitorPanelState,
+        sizingOptions: NSHostingSizingOptions
+    ) -> NSHostingController<some View> {
+        let controller = NSHostingController(
+            rootView: MonitorPanel()
+                .environmentObject(model)
+                .environmentObject(panelState)
+        )
+        controller.sizingOptions = sizingOptions
+        return controller
+    }
+
+    /// Finder/Dock launches open the control window; login-item and document launches stay quiet.
+    private static func isInteractiveLaunch(_ notification: Notification) -> Bool {
+        let isDefaultLaunch = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
+        return isDefaultLaunch && !wasLaunchedAsLoginItem()
+    }
+
+    private static func wasLaunchedAsLoginItem() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == AEEventID(kAEOpenApplication) else { return false }
+        return event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue
+            == OSType(keyAELaunchedAsLogInItem)
     }
 }
 

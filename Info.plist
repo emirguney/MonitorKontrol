@@ -6,6 +6,8 @@
     <string>tr</string>
     <key>CFBundleExecutable</key>
     <string>MonitorKontrol</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.emirhan.monitorkontrol</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -20,8 +22,6 @@
     <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

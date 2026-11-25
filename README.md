@@ -1,6 +1,6 @@
 # MonitorKontrol
 
-Apple Silicon Mac'lerde dahili ekran parlaklığını ve harici monitörlerin DDC/CI kontrollerini macOS menü çubuğundan yöneten yerel uygulama.
+Apple Silicon Mac'lerde dahili ekran parlaklığını ve harici monitörlerin DDC/CI kontrollerini macOS menü çubuğundan ve Dock'tan yöneten yerel uygulama.
 
 ## Özellikler
 
@@ -12,6 +12,8 @@ Apple Silicon Mac'lerde dahili ekran parlaklığını ve harici monitörlerin DD
 - DDC değerleri okunamayan bağlantılarda yazma odaklı HDMI uyumluluk moduna geçer.
 - Monitör takma, çıkarma ve uykudan uyanma olaylarında ekran listesini otomatik yeniler.
 - Otomatik yenilemede yalnızca ekran topolojisini tarayarak gereksiz DDC okumalarını ve menü çubuğu gecikmesini önler.
+- Dock'ta normal bir uygulama olarak görünür; Dock simgesine tıklamak monitör kontrol penceresini açar ya da öne getirir.
+- Menü çubuğu popover'ı ve kontrol penceresi aynı monitör durumunu paylaşır; pencere kapatılınca menü çubuğu simgesi ve medya tuşları çalışmaya devam eder.
 - Tahoe'da kararlı görünüm ve düşük yük için klasik `NSStatusItem` ile animasyonsuz `NSPopover` kullanır.
 - DDC motorunu uygulama içinde taşır; ayrıca Homebrew paketi kurulmasını gerektirmez.
 
@@ -31,7 +33,7 @@ chmod +x build.sh
 ./build.sh
 ```
 
-Derleme betiği vendored `m1ddc` aracını ve Swift uygulamasını derler, uygulamayı ad-hoc imzalar ve şu çıktıları üretir:
+Derleme betiği vendored `m1ddc` aracını, Swift uygulamasını ve Dock ikonunu (`scripts/generate-icon.swift`) derler, uygulamayı ad-hoc imzalar ve şu çıktıları üretir:
 
 - `dist/MonitorKontrol.app`
 - `dist/MonitorKontrol.zip`
@@ -40,9 +42,26 @@ Derleme betiği vendored `m1ddc` aracını ve Swift uygulamasını derler, uygul
 
 1. Harici monitörü Mac'e bağla.
 2. Monitörün fiziksel menüsünden **DDC/CI** özelliğini aç.
-3. `dist/MonitorKontrol.app` uygulamasını çalıştır.
-4. Menü çubuğundaki ekran simgesine tıkla.
+3. `MonitorKontrol.app` uygulamasını Finder'dan aç. İlk açılışta kontrol penceresi görünür.
+4. Kontrollere Dock simgesinden ya da menü çubuğundaki ekran simgesinden eriş.
 5. İlgili monitörü açarak parlaklık, kontrast, ses veya sessiz ayarını değiştir.
+
+Kontrol penceresini kapatmak uygulamayı kapatmaz; menü çubuğu simgesi ve medya tuşu yönlendirmesi çalışmaya devam eder. Uygulamadan tamamen çıkmak için `⌘Q` ya da paneldeki **Çık** düğmesini kullan.
+
+## Dock'a sabitleme
+
+Dock, sabitlenen uygulamayı dosya konumuyla hatırlar. `dist/` her derlemede yeniden oluşturulduğu için uygulamayı önce sabit bir konuma kopyala:
+
+```sh
+ditto dist/MonitorKontrol.app /Applications/MonitorKontrol.app
+open /Applications/MonitorKontrol.app
+```
+
+1. Uygulama çalışırken Dock'taki MonitorKontrol simgesine sağ tıkla.
+2. **Seçenekler → Dock'ta Tut**'u seç.
+3. Artık Dock simgesine tıklamak uygulamayı başlatır; uygulama çalışıyorsa kontrol penceresini öne getirir.
+
+Yeni bir sürüm derlediğinde aynı `ditto` komutuyla `/Applications` içindeki kopyayı güncelle. Ad-hoc imza her derlemede değiştiği için medya tuşları için verilen Erişilebilirlik iznini yeniden onaylaman gerekebilir.
 
 Sağ üstteki yenileme düğmesi ekranları tekrar tarar ve okunabilen gerçek DDC değerlerini yeniden yükler. Harici monitör kontrolleri ilk bulunduğunda açık, dahili ekran bölümü ise kapalı gösterilir.
 
